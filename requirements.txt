@@ -1,0 +1,12 @@
+langchain
+langchain-community
+langchain-groq
+langchain-huggingface
+langchain-chroma
+beautifulsoup4
+chromadb
+pandas
+st-theme
+tiktoken
+python-dotenv
+requests
