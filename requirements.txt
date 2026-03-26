@@ -11,3 +11,4 @@ tiktoken
 python-dotenv
 requests
 pysqlite3-binary
+protobuf==3.20.3
