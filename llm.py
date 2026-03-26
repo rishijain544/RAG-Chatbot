@@ -1,33 +1,20 @@
 import os
-import streamlit as st
 from typing import Union
+from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_ollama import OllamaLLM
 from langchain_core.language_models import BaseLanguageModel
 
-def get_groq_api_key():
-    # Try Streamlit secrets first (for cloud deployment)
-    try:
-        if "GROQ_API_KEY" in st.secrets:
-            return st.secrets["GROQ_API_KEY"]
-    except Exception:
-        pass
-        
-    # Fall back to .env for local development
-    from dotenv import load_dotenv
-    load_dotenv()
-    return os.getenv("GROQ_API_KEY")
+# Load API key from .env file
+load_dotenv()
 
 def get_llm(provider: str) -> BaseLanguageModel:
     """Returns a LangChain LLM object (Groq or Ollama) based on provider string."""
     try:
         if provider == "groq":
-            api_key = get_groq_api_key()
-            if api_key:
-                api_key = api_key.strip("'\" ")
-            
+            api_key = os.getenv("GROQ_API_KEY")
             if not api_key or api_key == "your_groq_api_key_here":
-                raise ValueError("GROQ_API_KEY is missing or contains the default placeholder.")
+                raise ValueError("GROQ_API_KEY is missing or contains the default placeholder in .env file.")
                 
             print(f"Loading Groq LLM: llama-3.3-70b-versatile")
             return ChatGroq(

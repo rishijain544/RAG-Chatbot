@@ -51,14 +51,17 @@ def ingest_urls(urls: List[str]) -> List[Document]:
             
         print(f"🌐 Fetching URL: {url}...")
         try:
-            # Step 1: Warm-up sequence for restricted sites (like NDTV)
-            if "ndtv.com" in url or "ndtvimg.com" in url:
-                print("🛡️ Detected restricted domain. Warming up session...")
+            # Step 1: Warm-up sequence for restricted sites (NDTV, Cricbuzz)
+            if any(domain in url for domain in ["ndtv.com", "ndtvimg.com", "cricbuzz.com"]):
+                print(f"🛡️ Detected restricted domain ({url}). Warming up session...")
                 try:
-                    session.get("https://www.ndtv.com/", timeout=10)
+                    # Get base domain for warm-up
+                    base_url = "https://" + url.split("/")[2]
+                    session.get(base_url, timeout=10)
+                    import time
                     time.sleep(0.5)
                     session.headers.update({
-                        "Referer": "https://www.ndtv.com/",
+                        "Referer": base_url,
                         "Sec-Fetch-Site": "same-origin"
                     })
                 except:
@@ -107,9 +110,9 @@ def ingest_urls(urls: List[str]) -> List[Document]:
             if headline:
                 extracted_text = headline.get_text(strip=True) + "\n\n"
             
-            # Priority 1: Main content containers (including NDTV-specific sp-cn)
-            content_containers = soup.find_all(["article", "main", "div"], 
-                                             class_=re.compile(r'content|article|body|story|post|entry|sp-cn|ins_storybody', re.I))
+            # Priority 1: Main content containers (including NDTV sp-cn and Cricbuzz text-base)
+            content_containers = soup.find_all(["article", "main", "div", "section"], 
+                                             class_=re.compile(r'content|article|body|story|post|entry|sp-cn|ins_storybody|text-base|cb-nws-dtl-itms', re.I))
             if content_containers:
                 body_text = "\n".join([c.get_text(separator=" ", strip=True) for c in content_containers if len(c.get_text()) > 100])
                 extracted_text += body_text
