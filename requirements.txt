@@ -3,6 +3,7 @@ langchain-community
 langchain-groq
 langchain-huggingface
 langchain-chroma
+sentence-transformers
 beautifulsoup4
 chromadb
 pandas
