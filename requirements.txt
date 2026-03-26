@@ -10,3 +10,4 @@ st-theme
 tiktoken
 python-dotenv
 requests
+pysqlite3-binary
