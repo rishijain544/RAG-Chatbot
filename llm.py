@@ -23,6 +23,9 @@ def get_llm(provider: str) -> BaseLanguageModel:
     try:
         if provider == "groq":
             api_key = get_groq_api_key()
+            if api_key:
+                api_key = api_key.strip("'\" ")
+            
             if not api_key or api_key == "your_groq_api_key_here":
                 raise ValueError("GROQ_API_KEY is missing or contains the default placeholder.")
                 
