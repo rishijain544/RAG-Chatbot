@@ -5,7 +5,5 @@ secondaryBackgroundColor = "#0b1117"
 textColor = "#e6edf3"
 font = "sans serif"
 
-[server]
-headless = true
-port = 8501
-enableXsrfProtection = true
+[browser]
+gatherUsageStats = false
