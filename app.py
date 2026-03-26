@@ -508,11 +508,8 @@ with st.sidebar:
 
     st.divider()
 
-    # Model Selection
-    st.markdown('<div style="font-family: Orbitron; font-size: 0.8rem; color: #bf00ff; margin-bottom: 10px;">2. CORE SELECTOR</div>', unsafe_allow_html=True)
-    llm_choice = st.radio("CORE", ["⚡ GROQ (LLAMA-3)", "🦙 OLLAMA (MISTRAL)"], label_visibility="collapsed")
-    st.session_state["model_used"] = "Groq" if "GROQ" in llm_choice else "Ollama"
-
+    # Model Selection (Simplified for Cloud)
+    st.session_state["model_used"] = "groq"
     st.divider()
 
     # Chat History

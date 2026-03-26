@@ -2,15 +2,11 @@ import os
 from typing import Union
 from dotenv import load_dotenv
 from langchain_groq import ChatGroq
-from langchain_ollama import OllamaLLM
-from langchain_core.language_models import BaseLanguageModel
-
-# Load API key from .env file
-load_dotenv()
-
-def get_llm(provider: str) -> BaseLanguageModel:
-    """Returns a LangChain LLM object (Groq or Ollama) based on provider string."""
+def get_llm(provider: str = "groq") -> BaseLanguageModel:
+    """Returns a LangChain LLM object (Groq) based on provider string."""
     try:
+        provider = provider.lower()
+        # Currently only supporting Groq for cloud reliability
         if provider == "groq":
             api_key = os.getenv("GROQ_API_KEY")
             if not api_key or api_key == "your_groq_api_key_here":
@@ -23,24 +19,8 @@ def get_llm(provider: str) -> BaseLanguageModel:
                 temperature=0.1,
                 max_tokens=2048
             )
-            
-        elif provider == "ollama":
-            # Quick check if Ollama is running
-            import requests
-            try:
-                requests.get("http://localhost:11434/api/tags", timeout=2)
-            except Exception:
-                raise ConnectionError("Ollama server is not detected at http://localhost:11434. Please ensure Ollama is running.")
-
-            print(f"Loading Ollama LLM: mistral")
-            return OllamaLLM(
-                model="mistral",
-                temperature=0.1,
-                num_predict=2048
-            )
-            
         else:
-            raise ValueError(f"Unknown LLM provider: {provider}")
+            raise ValueError(f"Unknown or unsupported LLM provider: {provider}")
             
     except Exception as e:
         print(f"Error loading LLM ({provider}): {e}")

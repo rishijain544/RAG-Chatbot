@@ -1,6 +1,6 @@
 import os
 from typing import List, Optional
-from langchain_ollama import OllamaEmbeddings
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
 
@@ -8,8 +8,8 @@ CHROMA_PATH = "./chroma_db"
 COLLECTION_NAME = "rag_docs"
 
 def get_embeddings():
-    """Returns Ollama embeddings with nomic-embed-text model."""
-    return OllamaEmbeddings(model="nomic-embed-text")
+    """Returns HuggingFace embeddings for cloud compatibility."""
+    return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
 def create_vectorstore(chunks: List[Document]) -> Chroma:
     """Builds and persists the vectorstore from chunks."""
