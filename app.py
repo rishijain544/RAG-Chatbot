@@ -1,4 +1,8 @@
 # Place robot image as "background.jpg" in project folder
+import os
+import logging
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3' 
+logging.getLogger('tensorflow').setLevel(logging.ERROR)
 try:
     __import__('pysqlite3')
     import sys
@@ -13,8 +17,10 @@ import json
 import uuid
 import base64
 import io
+import re
 from datetime import datetime
-# Removed speech_recognition and mic_recorder imports
+# Added for Tier 1 features
+import random
 
 # --- RAG Logic Imports ---
 from ingestor import ingest_urls
@@ -36,15 +42,101 @@ def get_base64_image(image_path):
         if os.path.exists(image_path):
             with open(image_path, "rb") as img_file:
                 return base64.b64encode(img_file.read()).decode()
-    except Exception:
-        return None
+    except Exception: return None
     return None
 
 bg_image = get_base64_image("background.jpg")
 
 # --- Constants & Storage ---
 HISTORY_FILE = "chat_history.json"
+SAVED_URLS_FILE = "saved_urls.json"
 
+# --- Tier 1 Helper Functions ---
+
+def load_saved_urls() -> dict:
+    if os.path.exists(SAVED_URLS_FILE):
+        try:
+            with open(SAVED_URLS_FILE, "r") as f:
+                return json.load(f)
+        except: pass
+    return {"favourite_urls": [], "auto_fetch_enabled": False, "last_fetched": None}
+
+def save_saved_urls(data):
+    with open(SAVED_URLS_FILE, "w") as f:
+        json.dump(data, f, indent=2)
+
+def add_saved_url(url, name, category="General"):
+    data = load_saved_urls()
+    if not any(u["url"] == url for u in data["favourite_urls"]):
+        data["favourite_urls"].append({
+            "url": url, "name": name,
+            "category": category,
+            "added_date": datetime.now().strftime("%Y-%m-%d")
+        })
+        save_saved_urls(data)
+
+def remove_saved_url(url):
+    data = load_saved_urls()
+    data["favourite_urls"] = [u for u in data["favourite_urls"] if u["url"] != url]
+    save_saved_urls(data)
+
+def detect_topics(chunks, llm) -> list:
+    try:
+        sample_text = " ".join([c.page_content for c in chunks[:5]])
+        prompt = f"""
+        Analyze this news content and identify the main topics.
+        Return ONLY a JSON list of 4-6 short topic tags.
+        Example: ["Sports", "Cricket", "IPL", "Politics"]
+        Content: {sample_text[:2000]}
+        Return only the JSON list, nothing else.
+        """
+        response = llm.invoke(prompt)
+        match = re.search(r'\[.*?\]', str(response.content) if hasattr(response, 'content') else str(response), re.DOTALL)
+        if match:
+            return json.loads(match.group())
+    except: pass
+    return ["General", "News", "Latest"]
+
+def calculate_confidence(answer, source_docs, question):
+    if not source_docs: return 15, "low"
+    
+    # Factor 1: Number of source chunks found (max 40%)
+    chunk_score = min(len(source_docs) / 8 * 40, 40)
+    
+    # Factor 2: Check if answer says "don't have info" (0% if so)
+    negative_phrases = ["don't have enough", "not enough information", "cannot find", "no information", "i don't know"]
+    if any(phrase in answer.lower() for phrase in negative_phrases):
+        return 15, "low"
+    
+    # Factor 3: Answer length (longer = more confident, max 30%)
+    length_score = min(len(answer) / 500 * 30, 30)
+    
+    # Factor 4: Source diversity (different URLs, max 30%)
+    unique_sources = len(set([doc.metadata.get("source", "Unknown") for doc in source_docs]))
+    diversity_score = min(unique_sources / 3 * 30, 30)
+    
+    total = min(int(chunk_score + length_score + diversity_score), 98)
+    level = "high" if total >= 75 else "medium" if total >= 45 else "low"
+    return total, level
+
+def generate_followups(answer, question, llm) -> list:
+    try:
+        prompt = f"""
+        Based on this Q&A, generate exactly 3 short follow-up questions a user might ask next.
+        Original Question: {question}
+        Answer given: {answer[:500]}
+        Return ONLY a JSON list of 3 strings.
+        Return only the JSON list, nothing else.
+        """
+        response = llm.invoke(prompt)
+        text = str(response.content) if hasattr(response, 'content') else str(response)
+        match = re.search(r'\[.*?\]', text, re.DOTALL)
+        if match:
+            return json.loads(match.group())[:3]
+    except: pass
+    return ["Tell me more about this", "What are the key facts?", "Who are the main people involved?"]
+
+# --- Existing Storage Helpers ---
 def load_history():
     if os.path.exists(HISTORY_FILE):
         with open(HISTORY_FILE, "r", encoding="utf-8") as f:
@@ -96,6 +188,16 @@ if "current_urls" not in st.session_state: st.session_state["current_urls"] = []
 if "search_query" not in st.session_state: st.session_state["search_query"] = ""
 if "hist_search" not in st.session_state: st.session_state["hist_search"] = ""
 if "faq_query" not in st.session_state: st.session_state["faq_query"] = None
+
+# New Tier 1 State Variables
+if "compare_mode" not in st.session_state: st.session_state["compare_mode"] = False
+if "db_A_ready" not in st.session_state: st.session_state["db_A_ready"] = False
+if "db_B_ready" not in st.session_state: st.session_state["db_B_ready"] = False
+if "active_topic" not in st.session_state: st.session_state["active_topic"] = "All"
+if "topics" not in st.session_state: st.session_state["topics"] = []
+if "language" not in st.session_state: st.session_state["language"] = "English"
+if "suggested_queries" not in st.session_state: st.session_state["suggested_queries"] = []
+if "auto_query" not in st.session_state: st.session_state["auto_query"] = None
 
 # --- CSS Theme Injection (LASER AI THEME) ---
 bg_img_css = f'background-image: url("data:image/jpeg;base64,{bg_image}");' if bg_image else "background-color: #000000;"
@@ -462,6 +564,8 @@ with st.sidebar:
             st.session_state["messages"] = []
             st.session_state["conversation_id"] = str(uuid.uuid4())
             st.session_state["active_history_id"] = None
+            st.session_state["current_urls"] = []
+            st.session_state["db_ready"] = False
             st.rerun()
         st.markdown('</div>', unsafe_allow_html=True)
     
@@ -478,28 +582,63 @@ with st.sidebar:
 
     # Data Ingestion
     st.markdown('<div style="font-family: Orbitron; font-size: 0.8rem; color: #00ffff; margin-bottom: 10px;">1. DATA INGESTION</div>', unsafe_allow_html=True)
-    url_text = st.text_area("TARGET ARRAYS", height=80, placeholder="Input neural sources (URLs)...", label_visibility="collapsed")
-    if st.button("🚀 EXECUTE INGESTION", type="primary", use_container_width=True):
-        if url_text:
-            progress = st.progress(0)
-            status = st.empty()
-            try:
-                urls = [u.strip() for u in url_text.split("\n") if u.strip()]
-                st.session_state["current_urls"] = urls
-                status.info("⚡ SYNCING NEUROLINKS...")
-                progress.progress(30)
-                chunks = ingest_urls(urls)
-                if chunks:
-                    status.info("🧠 MAPPING KNOWLEDGE GRAPH...")
-                    progress.progress(70)
-                    create_vectorstore(chunks)
-                    st.session_state["db_ready"] = True
-                    progress.progress(100)
-                    st.success("GRAPH SYNC COMPLETE!")
-                    time.sleep(1)
-                    st.rerun()
-            except Exception as e:
-                st.error(f"SYSTEM FAILURE: {e}")
+    st.info("⚠️ Note: On cloud deployment, please re-process your URLs after each app restart.")
+    
+    st.session_state["compare_mode"] = st.toggle("⚡ COMPARE MODE (SOURCE A vs B)", value=st.session_state["compare_mode"])
+    
+    if not st.session_state["compare_mode"]:
+        url_text = st.text_area("TARGET ARRAYS", height=80, placeholder="Input neural sources (URLs)...", label_visibility="collapsed")
+        if st.button("🚀 EXECUTE INGESTION", type="primary", use_container_width=True):
+            if url_text:
+                progress = st.progress(0)
+                status = st.empty()
+                try:
+                    urls = [u.strip() for u in url_text.split("\n") if u.strip()]
+                    st.session_state["current_urls"] = urls
+                    status.info("⚡ SYNCING NEUROLINKS...")
+                    progress.progress(30)
+                    chunks = ingest_urls(urls)
+                    if chunks:
+                        status.info("🧠 MAPPING KNOWLEDGE GRAPH...")
+                        progress.progress(70)
+                        create_vectorstore(chunks)
+                        st.session_state["topics"] = detect_topics(chunks, get_llm("groq"))
+                        st.session_state["active_topic"] = "All" # Reset active filter
+                        st.session_state["db_ready"] = True
+                        progress.progress(100)
+                        st.success("GRAPH SYNC COMPLETE!")
+                        time.sleep(1)
+                        st.rerun()
+                except Exception as e: st.error(f"SYSTEM FAILURE: {e}")
+    else:
+        # Compare Mode Inputs
+        c_a, c_b = st.columns(2)
+        with c_a:
+            st.markdown('<div style="font-size: 0.7rem; color: #bf00ff;">📰 SOURCE A URLs</div>', unsafe_allow_html=True)
+            url_a = st.text_area("SOURCE A", height=60, placeholder="URLs for A...", label_visibility="collapsed", key="url_a")
+            if st.button("PROCESS A", use_container_width=True):
+                if url_a:
+                    urls_a = [u.strip() for u in url_a.split("\n") if u.strip()]
+                    chunks_a = ingest_urls(urls_a)
+                    if chunks_a:
+                        create_vectorstore(chunks_a, path="./chroma_db_A", collection="source_A")
+                        st.session_state["db_A_ready"] = True
+                        st.session_state["topics"] = detect_topics(chunks_a, get_llm("groq"))
+                        st.session_state["active_topic"] = "All"
+                        st.success("✅ Source A Ready")
+        with c_b:
+            st.markdown('<div style="font-size: 0.7rem; color: #00ffff;">📰 SOURCE B URLs</div>', unsafe_allow_html=True)
+            url_b = st.text_area("SOURCE B", height=60, placeholder="URLs for B...", label_visibility="collapsed", key="url_b")
+            if st.button("PROCESS B", use_container_width=True):
+                if url_b:
+                    urls_b = [u.strip() for u in url_b.split("\n") if u.strip()]
+                    chunks_b = ingest_urls(urls_b)
+                    if chunks_b:
+                        create_vectorstore(chunks_b, path="./chroma_db_B", collection="source_B")
+                        st.session_state["db_B_ready"] = True
+                        st.session_state["topics"] = detect_topics(chunks_b, get_llm("groq"))
+                        st.session_state["active_topic"] = "All"
+                        st.success("✅ Source B Ready")
 
     if st.session_state["current_urls"]:
         with st.expander("📊 SOURCE PREVIEWS"):
@@ -508,8 +647,75 @@ with st.sidebar:
 
     st.divider()
 
-    # Model Selection (Simplified for Cloud)
+    st.divider()
+
+    # Topic Filter Preview (if any)
+    if st.session_state["topics"]:
+        st.markdown(f'<div style="font-size: 0.7rem; color: #00ff88;">🏷️ DETECTED TOPICS: {", ".join(st.session_state["topics"])}</div>', unsafe_allow_html=True)
+
+    st.divider()
+
+    # Saved Sources
+    saved_data = load_saved_urls()
+    favs = saved_data["favourite_urls"]
+    st.markdown(f'<div style="font-family: Orbitron; font-size: 0.8rem; color: #ffd700; margin-bottom: 10px;">2. ⭐ SAVED SOURCES ({len(favs)})</div>', unsafe_allow_html=True)
+    
+    with st.expander("MANAGE FAVOURITES"):
+        for i, fav in enumerate(favs):
+            f_col1, f_col2, f_col3 = st.columns([3, 1, 1])
+            f_col1.markdown(f'<div style="font-size: 0.7rem;">🌐 {fav["name"]}</div>', unsafe_allow_html=True)
+            if f_col2.button("LOAD", key=f"fav_load_{i}"):
+                with st.status(f"🔄 LOADING {fav['name']}...", expanded=False) as status:
+                    st.session_state["current_urls"] = [fav["url"]]
+                    st.session_state["url_input"] = fav["url"]
+                    chunks = ingest_urls([fav["url"]])
+                    if chunks:
+                        create_vectorstore(chunks)
+                        llm_load = get_llm("groq")
+                        st.session_state["topics"] = detect_topics(chunks, llm_load)
+                        st.session_state["active_topic"] = "All"
+                        st.session_state["db_ready"] = True
+                        status.update(label="✅ SOURCE LOADED!", state="complete")
+                        time.sleep(1)
+                        st.rerun()
+            if f_col3.button("🗑️", key=f"fav_del_{i}"):
+                remove_saved_url(fav["url"])
+                st.rerun()
+        
+        st.divider()
+        new_url = st.text_input("New URL", key="new_fav_url")
+        new_name = st.text_input("Name", key="new_fav_name")
+        if st.button("⭐ SAVE TO LIST", use_container_width=True):
+            if new_url and new_name:
+                add_saved_url(new_url, new_name)
+                st.success("Saved!")
+                time.sleep(0.5)
+                st.rerun()
+
+    # Auto-fetch toggle
+    auto_fetch = st.toggle("🔄 Auto-fetch on startup", value=saved_data.get("auto_fetch_enabled", False))
+    if auto_fetch != saved_data.get("auto_fetch_enabled", False):
+        saved_data["auto_fetch_enabled"] = auto_fetch
+        save_saved_urls(saved_data)
+
+    st.divider()
+
+    # Model & Language
+    st.markdown('<div style="font-family: Orbitron; font-size: 0.8rem; color: #0066ff; margin-bottom: 10px;">3. ENGINE SETTINGS</div>', unsafe_allow_html=True)
     st.session_state["model_used"] = "groq"
+    
+    language_flags = {
+        "English": "🇺🇸", "Hindi": "🇮🇳", "Spanish": "🇪🇸", "French": "🇫🇷",
+        "German": "🇩🇪", "Arabic": "🇸🇦", "Portuguese": "🇧🇷", "Japanese": "🇯🇵",
+        "Chinese": "🇨🇳", "Russian": "🇷🇺"
+    }
+    st.session_state["language"] = st.selectbox(
+        "RESPONSE LANGUAGE",
+        options=list(language_flags.keys()),
+        index=list(language_flags.keys()).index(st.session_state["language"]),
+        format_func=lambda x: f"{language_flags[x]} {x}"
+    )
+
     st.divider()
 
     # Chat History
@@ -525,11 +731,13 @@ with st.sidebar:
         
         for conv in all_convs:
             active = " border-left: 3px solid #00ffff;" if st.session_state["active_history_id"] == conv["id"] else ""
+            conf_html = f'<div style="font-size: 0.6rem; color: #00ff88; margin-top: 5px;">🎯 {conv.get("confidence", 0)}% CONFIDENCE</div>' if "confidence" in conv else ""
             with st.container():
                 st.markdown(f"""
                 <div class="history-card" style="{active} padding: 10px; margin-bottom: 10px; border-radius: 8px;">
                     <div style="font-family: Orbitron; font-size: 0.75rem; color: white;">{conv['title']}</div>
                     <div style="font-size: 0.6rem; color: #8b949e; margin-top: 5px;">{conv['date']} | {conv['model_used']}</div>
+                    {conf_html}
                 </div>
                 """, unsafe_allow_html=True)
                 
@@ -551,22 +759,85 @@ with st.sidebar:
         <div style="font-size: 0.7rem; color: #8b949e; margin-bottom: 5px;">ARCHITECTED BY</div>
         <div class="footer-name">✨ Rishi Jain ✨</div>
         <div style="height: 1px; background: linear-gradient(90deg, transparent, rgba(0,255,255,0.3), transparent); margin: 15px 0;"></div>
-        <div class="footer-stack">⚡ GROQ | 🦙 OLLAMA | 🦜 LC</div>
+        <div class="footer-stack">⚡ GROQ | 🤗 HF | 🦜 LC</div>
     </div>
     """, unsafe_allow_html=True)
+    
+    # Export Button
+    st.divider()
+    if st.session_state["messages"]:
+        chat_text = ""
+        for msg in st.session_state["messages"]:
+            chat_text += f"{msg['role'].upper()}: {msg['content']}\n\n"
+        st.download_button(
+            label="💾 EXPORT CONVERSATION",
+            data=chat_text,
+            file_name=f"chat_export_{st.session_state['conversation_id'][:8]}.txt",
+            mime="text/plain",
+            use_container_width=True
+        )
+
+# --- AUTO-FETCH LOGIC ---
+if "first_run" not in st.session_state:
+    st.session_state["first_run"] = False
+    s_data = load_saved_urls()
+    if s_data.get("auto_fetch_enabled") and s_data.get("favourite_urls"):
+        with st.sidebar:
+            with st.status("🔄 AUTO-FETCHING SAVED SOURCES...", expanded=True) as status:
+                fav_urls = [f["url"] for f in s_data["favourite_urls"]]
+                st.session_state["current_urls"] = fav_urls
+                a_chunks = ingest_urls(fav_urls)
+                if a_chunks:
+                    create_vectorstore(a_chunks)
+                    st.session_state["topics"] = detect_topics(a_chunks, get_llm("groq"))
+                    st.session_state["db_ready"] = True
+                    status.update(label=f"✅ AUTO-FETCH COMPLETE! {len(a_chunks)} chunks ready", state="complete")
+                    s_data["last_fetched"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+                    save_saved_urls(s_data)
+                    time.sleep(1)
+                    st.rerun()
 
 # --- MAIN CHAT AREA ---
 st.markdown('<div class="laser-title">RAG ASSISTANT AI</div>', unsafe_allow_html=True)
 st.markdown('<div class="laser-subtitle">NEURAL NEWS INTELLIGENCE SYSTEM</div>', unsafe_allow_html=True)
 
 # System Status Bar
+lang_badge = f'<div>🌍 {st.session_state["language"].upper()}</div>'
+topic_badge = f'<div>🏷️ #{st.session_state["active_topic"].upper()}</div>' if st.session_state["active_topic"] != "All" else ""
+
 st.markdown(f"""
 <div class="status-bar">
     <div><span class="status-dot"></span> SYSTEM ONLINE</div>
     <div>⚡ {st.session_state["model_used"].upper()} ENGINE CONNECTED</div>
     <div>🧠 CHROMA VECTOR READY</div>
+    {lang_badge}
+    {topic_badge}
 </div>
 """, unsafe_allow_html=True)
+
+# Topic Filter Tags
+if st.session_state.get("topics"):
+    st.markdown('<div class="faq-container" style="margin-bottom: 20px;">', unsafe_allow_html=True)
+    t_cols = st.columns(len(st.session_state["topics"]) + 1)
+    
+    with t_cols[0]:
+        active_style = "border: 1px solid #00ffff; box-shadow: 0 0 10px rgba(0,255,255,0.4); color: #00ffff;" if st.session_state["active_topic"] == "All" else "color: #00ffff88; border: 1px solid #00ffff44;"
+        st.markdown(f'<div class="faq-badge" style="{active_style}">', unsafe_allow_html=True)
+        if st.button("🌐 ALL", key="topic_all", use_container_width=True):
+            st.session_state["active_topic"] = "All"
+            st.rerun()
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+    for i, topic in enumerate(st.session_state["topics"]):
+        with t_cols[i+1]:
+            active_style = "border: 1px solid #00ffff; box-shadow: 0 0 10px rgba(0,255,255,0.4); color: #00ffff;" if st.session_state["active_topic"] == topic else "color: #00ffff88; border: 1px solid #00ffff44;"
+            st.markdown(f'<div class="faq-badge" style="{active_style}">', unsafe_allow_html=True)
+            if st.button(f"#{topic.upper()}", key=f"topic_{i}", use_container_width=True):
+                st.session_state["active_topic"] = topic
+                st.session_state["auto_query"] = f"Give me a detailed summary of the latest news related to {topic}."
+                st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # Quick Action FAQs
 st.markdown('<div class="faq-container">', unsafe_allow_html=True)
@@ -583,8 +854,19 @@ for i, label in enumerate(faq_queries):
         st.markdown('<div class="faq-badge">', unsafe_allow_html=True)
         if st.button(label, key=f"faq_{i}", use_container_width=True):
             st.session_state["faq_query"] = faq_map[label]
-        st.markdown('</div>', unsafe_allow_html=True)
 st.markdown('</div>', unsafe_allow_html=True)
+
+# Suggested Follow-ups
+if st.session_state.get("suggested_queries") and not st.session_state.get("thinking"):
+    st.markdown('<div class="faq-container" style="margin-top: 10px;">', unsafe_allow_html=True)
+    s_cols = st.columns(len(st.session_state["suggested_queries"]))
+    for j, s_label in enumerate(st.session_state["suggested_queries"]):
+        with s_cols[j]:
+            st.markdown('<div class="faq-badge">', unsafe_allow_html=True)
+            if st.button(s_label, key=f"suggest_{j}", use_container_width=True):
+                st.session_state["faq_query"] = s_label
+            st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
 
 # Chat Input Section
 user_input = st.chat_input("⚡ ENTER NEURAL QUERY...")
@@ -599,15 +881,64 @@ with st.container():
         if msg["role"] == "user":
             st.markdown(f'<div class="user-bubble">{msg["content"]}</div>', unsafe_allow_html=True)
         else:
-            st.markdown(f"""
-            <div class="assistant-bubble">
-                {msg['content']}
-                <div style="display: flex; gap: 10px; margin-top: 15px; font-family: Orbitron; font-size: 8px;">
-                    <span style="border: 1px solid #00ffff; color: #00ffff; padding: 2px 8px; border-radius: 4px;">⚡ LATENCY: {msg.get('time', '0')}s</span>
-                    <span style="border: 1px solid #bf00ff; color: #bf00ff; padding: 2px 8px; border-radius: 4px;">🎯 CONFIDENCE: HIGH</span>
+            if msg.get("is_comparison"):
+                # --- NATIVE STREAMLIT COMPARISON (Fixes overlap & code display) ---
+                st.markdown(f'<div style="font-family: Orbitron; color: #00ffff; margin-bottom: 10px; font-size: 1.2rem;">📊 NEURAL COMPARISON: {msg.get("timestamp")}</div>', unsafe_allow_html=True)
+                
+                c1, c2 = st.columns(2)
+                with c1:
+                    st.markdown(f"""
+                    <div style="background: rgba(191,0,255,0.08); border: 1px solid rgba(191,0,255,0.3); padding: 15px; border-radius: 12px; height: 100%;">
+                        <h4 style="color: #bf00ff; margin-top: 0; font-family: Orbitron;">📰 SOURCE A</h4>
+                        <div style="font-size: 0.9rem; line-height: 1.6;">{msg.get('content_a', '')}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                with c2:
+                    st.markdown(f"""
+                    <div style="background: rgba(0,255,255,0.08); border: 1px solid rgba(0,255,255,0.3); padding: 15px; border-radius: 12px; height: 100%;">
+                        <h4 style="color: #00ffff; margin-top: 0; font-family: Orbitron;">📰 SOURCE B</h4>
+                        <div style="font-size: 0.9rem; line-height: 1.6;">{msg.get('content_b', '')}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                # Synthesis below
+                st.markdown(f"""
+                <div style="margin-top: 20px; background: rgba(0,0,0,0.4); border: 1px solid rgba(255,215,0,0.2); padding: 20px; border-radius: 12px; border-left: 5px solid #ffd700;">
+                    <h4 style="color: #ffd700; margin-top: 0; font-family: Orbitron;">🔄 AI SYNTHESIS</h4>
+                    <div style="font-size: 0.95rem; line-height: 1.7;">{msg.get('content_synth', '')}</div>
                 </div>
-            </div>
-            """, unsafe_allow_html=True)
+                """, unsafe_allow_html=True)
+                
+                # Confidence and Time
+                st.markdown(f"""
+                <div style="display:flex; align-items:center; gap:12px; margin-top:15px; background: rgba(0,0,0,0.3); padding: 10px; border-radius: 10px;">
+                  <div style="border: 1px solid #00ff88; border-radius: 20px; padding: 2px 12px; font-size: 10px; color: #00ff88; font-family: 'Orbitron';">🎯 95% CONFIDENCE</div>
+                  <div style="flex: 1; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px;"><div style="width: 95%; height: 100%; background: #00ff88; border-radius:2px;"></div></div>
+                  <div style="font-family: Orbitron; font-size: 8px; color: #00ffff88;">⚡ {msg.get('time', '0')}s</div>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                # Standard Assistant Bubble (Fixed rendering)
+                score = msg.get("confidence", 100)
+                level = msg.get("confidence_level", "high")
+                colors = {"high": "#00ff88", "medium": "#ffaa00", "low": "#ff4444"}
+                color = colors.get(level, "#00ffff")
+                
+                # Render content first
+                st.markdown(f'<div class="assistant-bubble">{msg["content"]}</div>', unsafe_allow_html=True)
+                
+                # Render confidence score as a separate HTML element below
+                st.markdown(f"""
+                <div style="display:flex; align-items:center; gap:12px; margin-top:-10px; margin-bottom: 20px; background: rgba(0,0,0,0.3); padding: 8px; border-radius: 10px; border: 1px solid rgba(255,255,255,0.05); max-width: 85%; margin-left: auto;">
+                  <div style="background: rgba(0,0,0,0.4); border: 1px solid {color}; border-radius: 20px; padding: 2px 10px; font-size: 10px; color: {color}; box-shadow: 0 0 8px {color}44; font-family: 'Orbitron';">
+                    🎯 {score}% — {level.upper()}
+                  </div>
+                  <div style="flex: 1; height: 3px; background: rgba(255,255,255,0.1); border-radius: 2px; overflow: hidden;">
+                    <div style="width: {score}%; height: 100%; background: linear-gradient(90deg, {color}88, {color}); border-radius: 2px;"></div>
+                  </div>
+                  <div style="font-family: Orbitron; font-size: 8px; color: #00ffff88;">⚡ {msg.get('time', '0')}s</div>
+                </div>
+                """, unsafe_allow_html=True)
     st.markdown('</div>', unsafe_allow_html=True)
 
 # Typing Indicator
@@ -624,7 +955,11 @@ if st.session_state.get("thinking", False):
     """, unsafe_allow_html=True)
 
 # --- RAG EXECUTION ---
-user_q = user_input if user_input else st.session_state.get("faq_query")
+# Handle auto_query from follow-up chips
+if st.session_state.get("auto_query"):
+    user_q = st.session_state.pop("auto_query")
+else:
+    user_q = user_input if user_input else st.session_state.get("faq_query")
 
 if user_q:
     st.session_state["faq_query"] = None # Reset FAQ state
@@ -634,31 +969,92 @@ if user_q:
     st.rerun()
 
 if st.session_state.get("thinking"):
-    if not st.session_state["db_ready"]:
+    if not st.session_state["db_ready"] and not st.session_state["compare_mode"]:
         st.warning("⚠️ KNOWLEDGE GRAPH EMPTY. SYNC TARGET ARRAYS IN SIDEBAR.")
+        st.session_state["thinking"] = False
+    elif st.session_state["compare_mode"] and (not st.session_state["db_A_ready"] or not st.session_state["db_B_ready"]):
+        st.warning("⚠️ BOTH SOURCES A & B MUST BE PROCESSED FOR COMPARISON.")
         st.session_state["thinking"] = False
     else:
         try:
             start_t = time.time()
-            vstore = load_vectorstore()
-            if vstore:
-                llm = get_llm("groq" if st.session_state["model_used"] == "Groq" else "ollama")
-                chain = get_rag_chain(vstore, llm)
-                resp = chain(st.session_state["messages"][-1]["content"])
+            llm = get_llm("groq")
+            
+            # Prepare Instructions
+            language_map = {
+                "Hindi": "हिंदी में जवाब दें।", "Spanish": "Responde en español.",
+                "French": "Réponds en français.", "German": "Antworte auf Deutsch.",
+                "Arabic": "أجب باللغة العربية.", "Portuguese": "Responda em português.",
+                "Japanese": "日本語で答えてください。", "Chinese": "请用中文回答。",
+                "Russian": "Ответьте на русском языке.", "English": "Answer in English."
+            }
+            lang_inst = language_map.get(st.session_state["language"], "Answer in English.")
+            topic_inst = f"Focus specifically on information related to {st.session_state['active_topic']}." if st.session_state["active_topic"] != "All" else ""
+            
+            final_query = f"{st.session_state['messages'][-1]['content']}\n\nIMPORTANT: {lang_inst} {topic_inst}"
+            
+            if not st.session_state["compare_mode"]:
+                # Normal Mode
+                vstore = load_vectorstore()
+                if vstore:
+                    chain = get_rag_chain(vstore, llm)
+                    resp = chain(final_query)
+                    
+                    duration = round(time.time() - start_t, 2)
+                    timestamp = datetime.now().strftime("%I:%M %p")
+                    score, level = calculate_confidence(resp["result"], resp["source_documents"], user_q)
+                    
+                    asst_msg = {
+                        "role": "assistant",
+                        "content": resp["result"],
+                        "sources": list(set([d.metadata.get("source") for d in resp["source_documents"]])),
+                        "time": duration,
+                        "timestamp": timestamp,
+                        "confidence": score,
+                        "confidence_level": level
+                    }
+                    st.session_state["messages"].append(asst_msg)
+                    st.session_state["suggested_queries"] = generate_followups(resp["result"], user_q, llm)
+            else:
+                # Compare Mode (Dual RAG)
+                v_a = load_vectorstore(path="./chroma_db_A", collection="source_A")
+                v_b = load_vectorstore(path="./chroma_db_B", collection="source_B")
                 
-                duration = round(time.time() - start_t, 2)
-                timestamp = datetime.now().strftime("%I:%M %p")
-                
-                asst_msg = {
-                    "role": "assistant",
-                    "content": resp["result"],
-                    "sources": list(set([d.metadata.get("source") for d in resp["source_documents"]])),
-                    "time": duration,
-                    "timestamp": timestamp
-                }
-                st.session_state["messages"].append(asst_msg)
-                
-                # Auto-save
+                if v_a and v_b:
+                    resp_a = get_rag_chain(v_a, llm)(final_query)
+                    resp_b = get_rag_chain(v_b, llm)(final_query)
+                    
+                    # AI Synthesis
+                    synth_prompt = f"""
+                    Given these two perspectives on the same question:
+                    Source A says: {resp_a['result']}
+                    Source B says: {resp_b['result']}
+                    Question was: {user_q}
+                    Provide a brief synthesis: What do both agree on? What are the key differences? Which is more detailed?
+                    """
+                    synthesis = llm.invoke(synth_prompt)
+                    synth_text = str(synthesis.content) if hasattr(synthesis, 'content') else str(synthesis)
+                    
+                    duration = round(time.time() - start_t, 2)
+                    timestamp = datetime.now().strftime("%I:%M %p")
+                    
+                    asst_msg = {
+                        "role": "assistant",
+                        "content": "NEURAL COMPARISON COMPLETE", # Placeholder for history
+                        "content_a": resp_a['result'],
+                        "content_b": resp_b['result'],
+                        "content_synth": synth_text,
+                        "time": duration,
+                        "timestamp": timestamp,
+                        "confidence": 95,
+                        "confidence_level": "high",
+                        "is_comparison": True
+                    }
+                    st.session_state["messages"].append(asst_msg)
+                    st.session_state["suggested_queries"] = generate_followups(resp_a["result"], user_q, llm)
+
+            # Auto-save
+            if st.session_state["messages"]:
                 conv_data = {
                     "id": st.session_state["conversation_id"],
                     "title": st.session_state["messages"][0]["content"][:35],
@@ -666,9 +1062,11 @@ if st.session_state.get("thinking"):
                     "date_ts": time.time(),
                     "messages": st.session_state["messages"],
                     "model_used": st.session_state["model_used"],
+                    "confidence": st.session_state["messages"][-1].get("confidence", 0) if st.session_state["messages"][-1]["role"] == "assistant" else 0,
                     "total_messages": len(st.session_state["messages"])
                 }
                 save_conversation(conv_data)
+                
             st.session_state["thinking"] = False
             st.rerun()
         except Exception as e:

@@ -3,6 +3,8 @@
 
 # Databases
 chroma_db/
+chroma_db_A/
+chroma_db_B/
 chroma.sqlite3
 
 # Python
@@ -14,6 +16,7 @@ env/
 
 # Data & Logs
 chat_history.json
+saved_urls.json
 ingestor_debug.txt
 *output.txt
 

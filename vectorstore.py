@@ -1,54 +1,63 @@
-import os
-from typing import List, Optional
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
 from langchain_core.documents import Document
+import os
+import shutil
+from typing import List, Optional
 
+# Constants
 CHROMA_PATH = "./chroma_db"
-COLLECTION_NAME = "rag_docs"
+COLLECTION_NAME = "neural_docs"  # New name to force fresh start
 
-def get_embeddings():
-    """Returns HuggingFace embeddings for cloud compatibility."""
-    return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-
-def create_vectorstore(chunks: List[Document]) -> Chroma:
-    """Builds and persists the vectorstore from chunks."""
+def create_vectorstore(chunks: List[Document], path: str = CHROMA_PATH, collection: str = COLLECTION_NAME):
+    """Creates a vectorstore from document chunks using HuggingFace embeddings."""
     try:
-        print(f"Embedding {len(chunks)} chunks...")
+        # Clear existing to prevent source overlap
+        if os.path.exists(path):
+            shutil.rmtree(path, ignore_errors=True)
+            
+        # Initialize HuggingFace embeddings
+        embeddings = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2",
+            model_kwargs={"device": "cpu"},
+            encode_kwargs={"normalize_embeddings": True}
+        )
+        
+        print(f"Embedding {len(chunks)} chunks into {path}...")
+        
         vectorstore = Chroma.from_documents(
             documents=chunks,
-            embedding=get_embeddings(),
-            persist_directory=CHROMA_PATH,
-            collection_name=COLLECTION_NAME
+            embedding=embeddings,
+            persist_directory=path,
+            collection_name=collection
         )
-        # Persistent storage is automatic in newer Chroma versions, 
-        # but Chroma.from_documents handles it.
-        print("Vectorstore saved.")
+        
+        print(f"Vectorstore saved to {path}.")
         return vectorstore
     except Exception as e:
         print(f"Error creating vectorstore: {e}")
         raise
 
-def load_vectorstore() -> Optional[Chroma]:
-    """Loads the existing ChromaDB from disk."""
-    if not os.path.exists(CHROMA_PATH):
-        print(f"Warning: ChromaDB path '{CHROMA_PATH}' does not exist.")
+def load_vectorstore(path: str = CHROMA_PATH, collection: str = COLLECTION_NAME) -> Optional[object]:
+    """Loads the existing Chroma DB from specified path."""
+    if not os.path.exists(path):
         return None
         
     try:
-        print(f"Loading vectorstore from {CHROMA_PATH}...")
-        vectorstore = Chroma(
-            persist_directory=CHROMA_PATH,
-            embedding_function=get_embeddings(),
-            collection_name=COLLECTION_NAME
+        # Initialize the same HuggingFace embeddings model
+        embeddings = HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2",
+            model_kwargs={"device": "cpu"},
+            encode_kwargs={"normalize_embeddings": True}
         )
+        
+        vectorstore = Chroma(
+            persist_directory=path,
+            embedding_function=embeddings,
+            collection_name=collection
+        )
+        
         return vectorstore
     except Exception as e:
-        print(f"Error loading vectorstore: {e}")
+        print(f"Error loading vectorstore from {path}: {e}")
         return None
-
-if __name__ == "__main__":
-    # Test block
-    db = load_vectorstore()
-    if db:
-        print("Successfully loaded existing DB.")
