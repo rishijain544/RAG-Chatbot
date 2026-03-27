@@ -14,3 +14,4 @@ sentence-transformers
 streamlit-mic-recorder
 SpeechRecognition
 tf-keras
+pysqlite3-binary
