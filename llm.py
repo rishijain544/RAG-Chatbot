@@ -29,7 +29,8 @@ def get_llm(provider: str):
                 api_key=api_key,
                 model="llama-3.1-8b-instant",
                 temperature=0.1,
-                max_tokens=2048
+                max_tokens=2048,
+                max_retries=6 # Exponential backoff handles rate limits
             )
         else:
             raise ValueError(f"Unknown provider: {provider}. Currently only 'groq' is supported.")

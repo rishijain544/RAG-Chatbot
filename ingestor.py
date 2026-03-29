@@ -11,12 +11,19 @@ if sys.stdout.encoding.lower() != 'utf-8':
     import io
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
 
+# Scaling Constants
+MAX_URLS = 5
+MAX_CHARS_PER_URL = 100000
+
 def ingest_urls_as_corpus(urls: List[str]) -> str:
     """
     Accepts a list of URLs, fetches content, and returns a single concatenated 
     string of all extracted news content.
     """
     corpus = []
+    
+    # Enforce limit for 1000+ user scalability
+    urls = urls[:MAX_URLS]
     
     # Modern Browser Headers (Chrome 124)
     base_headers = {
@@ -75,6 +82,10 @@ def ingest_urls_as_corpus(urls: List[str]) -> str:
             # Clean and append to corpus
             full_text = re.sub(r'\n+', '\n', extracted_text).strip()
             full_text = re.sub(r' +', ' ', full_text)
+            
+            # Scale-out: Truncate very large articles
+            if len(full_text) > MAX_CHARS_PER_URL:
+                full_text = full_text[:MAX_CHARS_PER_URL] + "... [TRUNCATED FOR SYSTEM STABILITY]"
             
             if len(full_text) > 100:
                 print(f"✅ SUCCESS: Extracted {len(full_text)} chars from {url}")

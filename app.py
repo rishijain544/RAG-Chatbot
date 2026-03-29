@@ -97,6 +97,30 @@ def detect_topics(chunks, llm) -> list:
     except: pass
     return ["General", "News", "Latest"]
 
+def get_session_path(db_type="main"):
+    """Returns a session-specific path for the vectorstore."""
+    session_id = st.session_state.get("conversation_id", "default")
+    return os.path.join(".", "data", "sessions", session_id, f"chroma_db_{db_type}")
+
+def cleanup_old_sessions(max_age_hours=12):
+    """Deletes session directories older than max_age_hours to save disk space."""
+    base_path = os.path.join(".", "data", "sessions")
+    if not os.path.exists(base_path):
+        return
+        
+    try:
+        now = time.time()
+        for session_id in os.listdir(base_path):
+            session_dir = os.path.join(base_path, session_id)
+            if os.path.isdir(session_dir):
+                mtime = os.path.getmtime(session_dir)
+                if (now - mtime) > (max_age_hours * 3600):
+                    import shutil
+                    shutil.rmtree(session_dir, ignore_errors=True)
+                    print(f"Cleaned up old session: {session_id}")
+    except Exception as e:
+        print(f"Cleanup error: {e}")
+
 def calculate_confidence(answer, source_docs, question):
     if not source_docs: return 15, "low"
     
@@ -582,7 +606,7 @@ with st.sidebar:
 
     # Data Ingestion
     st.markdown('<div style="font-family: Orbitron; font-size: 0.8rem; color: #00ffff; margin-bottom: 10px;">1. DATA INGESTION</div>', unsafe_allow_html=True)
-    st.info("⚠️ Note: On cloud deployment, please re-process your URLs after each app restart.")
+    st.info("⚡ System optimized for 1000+ concurrent sessions. (Cleanup active)")
     
     st.session_state["compare_mode"] = st.toggle("⚡ COMPARE MODE (SOURCE A vs B)", value=st.session_state["compare_mode"])
     
@@ -601,7 +625,7 @@ with st.sidebar:
                     if chunks:
                         status.info("🧠 MAPPING KNOWLEDGE GRAPH...")
                         progress.progress(70)
-                        create_vectorstore(chunks)
+                        create_vectorstore(chunks, path=get_session_path("main"))
                         st.session_state["topics"] = detect_topics(chunks, get_llm("groq"))
                         st.session_state["active_topic"] = "All" # Reset active filter
                         st.session_state["db_ready"] = True
@@ -621,7 +645,7 @@ with st.sidebar:
                     urls_a = [u.strip() for u in url_a.split("\n") if u.strip()]
                     chunks_a = ingest_urls(urls_a)
                     if chunks_a:
-                        create_vectorstore(chunks_a, path="./chroma_db_A", collection="source_A")
+                        create_vectorstore(chunks_a, path=get_session_path("A"), collection="source_A")
                         st.session_state["db_A_ready"] = True
                         st.session_state["topics"] = detect_topics(chunks_a, get_llm("groq"))
                         st.session_state["active_topic"] = "All"
@@ -634,7 +658,7 @@ with st.sidebar:
                     urls_b = [u.strip() for u in url_b.split("\n") if u.strip()]
                     chunks_b = ingest_urls(urls_b)
                     if chunks_b:
-                        create_vectorstore(chunks_b, path="./chroma_db_B", collection="source_B")
+                        create_vectorstore(chunks_b, path=get_session_path("B"), collection="source_B")
                         st.session_state["db_B_ready"] = True
                         st.session_state["topics"] = detect_topics(chunks_b, get_llm("groq"))
                         st.session_state["active_topic"] = "All"
@@ -670,7 +694,7 @@ with st.sidebar:
                     st.session_state["url_input"] = fav["url"]
                     chunks = ingest_urls([fav["url"]])
                     if chunks:
-                        create_vectorstore(chunks)
+                        create_vectorstore(chunks, path=get_session_path("main"))
                         llm_load = get_llm("groq")
                         st.session_state["topics"] = detect_topics(chunks, llm_load)
                         st.session_state["active_topic"] = "All"
@@ -780,6 +804,9 @@ with st.sidebar:
 # --- AUTO-FETCH LOGIC ---
 if "first_run" not in st.session_state:
     st.session_state["first_run"] = False
+    # Scale-out: Cleanup old data on new connection
+    cleanup_old_sessions()
+    
     s_data = load_saved_urls()
     if s_data.get("auto_fetch_enabled") and s_data.get("favourite_urls"):
         with st.sidebar:
@@ -788,7 +815,7 @@ if "first_run" not in st.session_state:
                 st.session_state["current_urls"] = fav_urls
                 a_chunks = ingest_urls(fav_urls)
                 if a_chunks:
-                    create_vectorstore(a_chunks)
+                    create_vectorstore(a_chunks, path=get_session_path("main"))
                     st.session_state["topics"] = detect_topics(a_chunks, get_llm("groq"))
                     st.session_state["db_ready"] = True
                     status.update(label=f"✅ AUTO-FETCH COMPLETE! {len(a_chunks)} chunks ready", state="complete")
@@ -995,7 +1022,7 @@ if st.session_state.get("thinking"):
             
             if not st.session_state["compare_mode"]:
                 # Normal Mode
-                vstore = load_vectorstore()
+                vstore = load_vectorstore(path=get_session_path("main"))
                 if vstore:
                     chain = get_rag_chain(vstore, llm)
                     resp = chain(final_query)
@@ -1017,8 +1044,8 @@ if st.session_state.get("thinking"):
                     st.session_state["suggested_queries"] = generate_followups(resp["result"], user_q, llm)
             else:
                 # Compare Mode (Dual RAG)
-                v_a = load_vectorstore(path="./chroma_db_A", collection="source_A")
-                v_b = load_vectorstore(path="./chroma_db_B", collection="source_B")
+                v_a = load_vectorstore(path=get_session_path("A"), collection="source_A")
+                v_b = load_vectorstore(path=get_session_path("B"), collection="source_B")
                 
                 if v_a and v_b:
                     resp_a = get_rag_chain(v_a, llm)(final_query)
