@@ -26,6 +26,6 @@ test_*.py
 verify_*.py
 background.jpg.jpg
 
-# OS
-.DS_Store
-Thumbs.db
+# Scaling & Session Data
+data/
+.venv/
