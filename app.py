@@ -222,6 +222,9 @@ if "topics" not in st.session_state: st.session_state["topics"] = []
 if "language" not in st.session_state: st.session_state["language"] = "English"
 if "suggested_queries" not in st.session_state: st.session_state["suggested_queries"] = []
 if "auto_query" not in st.session_state: st.session_state["auto_query"] = None
+if "collection_main" not in st.session_state: st.session_state["collection_main"] = "neural_docs"
+if "collection_A" not in st.session_state: st.session_state["collection_A"] = "source_A"
+if "collection_B" not in st.session_state: st.session_state["collection_B"] = "source_B"
 
 # --- CSS Theme Injection (LASER AI THEME) ---
 bg_img_css = f'background-image: url("data:image/jpeg;base64,{bg_image}");' if bg_image else "background-color: #000000;"
@@ -625,7 +628,9 @@ with st.sidebar:
                     if chunks:
                         status.info("🧠 MAPPING KNOWLEDGE GRAPH...")
                         progress.progress(70)
-                        create_vectorstore(chunks, path=get_session_path("main"))
+                        # Unique collection ID to avoid metadata mismatch
+                        st.session_state["collection_main"] = f"main_{uuid.uuid4().hex[:8]}"
+                        create_vectorstore(chunks, path=get_session_path("main"), collection=st.session_state["collection_main"])
                         st.session_state["topics"] = detect_topics(chunks, get_llm("groq"))
                         st.session_state["active_topic"] = "All" # Reset active filter
                         st.session_state["db_ready"] = True
@@ -645,7 +650,8 @@ with st.sidebar:
                     urls_a = [u.strip() for u in url_a.split("\n") if u.strip()]
                     chunks_a = ingest_urls(urls_a)
                     if chunks_a:
-                        create_vectorstore(chunks_a, path=get_session_path("A"), collection="source_A")
+                        st.session_state["collection_A"] = f"source_A_{uuid.uuid4().hex[:8]}"
+                        create_vectorstore(chunks_a, path=get_session_path("A"), collection=st.session_state["collection_A"])
                         st.session_state["db_A_ready"] = True
                         st.session_state["topics"] = detect_topics(chunks_a, get_llm("groq"))
                         st.session_state["active_topic"] = "All"
@@ -658,7 +664,8 @@ with st.sidebar:
                     urls_b = [u.strip() for u in url_b.split("\n") if u.strip()]
                     chunks_b = ingest_urls(urls_b)
                     if chunks_b:
-                        create_vectorstore(chunks_b, path=get_session_path("B"), collection="source_B")
+                        st.session_state["collection_B"] = f"source_B_{uuid.uuid4().hex[:8]}"
+                        create_vectorstore(chunks_b, path=get_session_path("B"), collection=st.session_state["collection_B"])
                         st.session_state["db_B_ready"] = True
                         st.session_state["topics"] = detect_topics(chunks_b, get_llm("groq"))
                         st.session_state["active_topic"] = "All"
@@ -694,7 +701,9 @@ with st.sidebar:
                     st.session_state["url_input"] = fav["url"]
                     chunks = ingest_urls([fav["url"]])
                     if chunks:
-                        create_vectorstore(chunks, path=get_session_path("main"))
+                        # Unique collection ID to avoid metadata mismatch
+                        st.session_state["collection_main"] = f"main_{uuid.uuid4().hex[:8]}"
+                        create_vectorstore(chunks, path=get_session_path("main"), collection=st.session_state["collection_main"])
                         llm_load = get_llm("groq")
                         st.session_state["topics"] = detect_topics(chunks, llm_load)
                         st.session_state["active_topic"] = "All"
@@ -1022,7 +1031,8 @@ if st.session_state.get("thinking"):
             
             if not st.session_state["compare_mode"]:
                 # Normal Mode
-                vstore = load_vectorstore(path=get_session_path("main"))
+                v_coll = st.session_state.get("collection_main", "neural_docs")
+                vstore = load_vectorstore(path=get_session_path("main"), collection=v_coll)
                 if vstore:
                     chain = get_rag_chain(vstore, llm)
                     resp = chain(final_query)
@@ -1044,8 +1054,10 @@ if st.session_state.get("thinking"):
                     st.session_state["suggested_queries"] = generate_followups(resp["result"], user_q, llm)
             else:
                 # Compare Mode (Dual RAG)
-                v_a = load_vectorstore(path=get_session_path("A"), collection="source_A")
-                v_b = load_vectorstore(path=get_session_path("B"), collection="source_B")
+                coll_a = st.session_state.get("collection_A", "source_A")
+                coll_b = st.session_state.get("collection_B", "source_B")
+                v_a = load_vectorstore(path=get_session_path("A"), collection=coll_a)
+                v_b = load_vectorstore(path=get_session_path("B"), collection=coll_b)
                 
                 if v_a and v_b:
                     resp_a = get_rag_chain(v_a, llm)(final_query)

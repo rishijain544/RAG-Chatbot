@@ -33,31 +33,19 @@ def create_vectorstore(chunks: List[Document], path: str = CHROMA_PATH, collecti
         print(f"Initializing PersistentClient at {abs_path}...")
         client = chromadb.PersistentClient(path=abs_path, settings=Settings(allow_reset=True))
         
-        # Try to delete if existing to ensure metadata consistency
-        try:
-            client.delete_collection(collection)
-        except: pass
-        
+        # We handle collection freshness by using unique IDs from the app layer
         vectorstore = Chroma.from_documents(
             documents=chunks,
             embedding=embeddings,
             persist_directory=abs_path,
             collection_name=collection,
-            client=client # Pass explicit client
+            client=client
         )
         
-        print(f"Vectorstore ready at {abs_path}.")
+        print(f"Vectorstore ready at {abs_path} [Collection: {collection}]")
         return vectorstore
     except Exception as e:
-        print(f"Deep Failure creating vectorstore at {path}: {e}")
-        # Final fallback: Try a slightly randomized path if it's a lock issue
-        if "chromadb" in str(type(e)).lower() or "InternalError" in str(e):
-            try:
-                import time
-                new_path = f"{abs_path}_{int(time.time())}"
-                print(f"🔄 Retrying with fresh path: {new_path}")
-                return create_vectorstore(chunks, path=new_path, collection=collection)
-            except: pass
+        print(f"Failure creating vectorstore at {path}: {e}")
         raise
 
 def load_vectorstore(path: str = CHROMA_PATH, collection: str = COLLECTION_NAME) -> Optional[object]:
